@@ -1,0 +1,843 @@
+                'rap': ['rap', 'хип-хоп', 'рэп'],
+                'rock': ['rock', 'рок', 'гитар'],
+                'dance': ['dance', 'электро', 'house', 'техно'],
+                'chill': ['chill', 'лёгк', 'релакс'],
+                'sad': ['sad', 'груст', 'медлен'],
+                'workout': ['workout', 'спорт', 'энерг', 'pump'],
+                'lofi': ['lofi', 'лоуфай'],
+                'metal': ['metal', 'метал', 'тяжел']
+            };
+            
+            const genreCount = {};
+            
+            allTracks.forEach(track => {
+                const title = track.title?.toLowerCase() || '';
+                const artist = track.artist?.name?.toLowerCase() || '';
+                
+                for (const [genre, keywords] of Object.entries(genreKeywords)) {
+                    if (keywords.some(keyword => title.includes(keyword) || artist.includes(keyword))) {
+                        genreCount[genre] = (genreCount[genre] || 0) + 1;
+                    }
+                }
+            });
+            
+            let topGenre = '';
+            let maxCount = 0;
+            for (const [genre, count] of Object.entries(genreCount)) {
+                if (count > maxCount) {
+                    maxCount = count;
+                    topGenre = genre;
+                }
+            }
+            
+            vibeGenre = topGenre || 'chill';
+        }
+
+        window.startVibePlaylist = async () => {
+            isVibeMode = true;
+            showToast("Анализирую ваши вкусы...");
+            
+            vibeQueue = [];
+            vibeIndex = -1;
+            vibeSessionHistory.clear();
+            
+            await loadVibeTracks(false);
+            
+            if (vibeQueue.length > 0) {
+                vibeIndex = 0;
+                currentQueue = vibeQueue;
+                currentIndex = 0;
+                showToast("VIBE запущен 🔥");
+                await loadTrackHybrid(vibeQueue[0]);
+            } else {
+                showToast("Мало данных. Попробуйте послушать больше треков.");
+                isVibeMode = false;
+            }
+        };
+
+        // ================== SMART VIBE ENGINE ==================
+        async function loadVibeTracks(isAppend = false) {
+            try {
+                const artistScores = {};
+                for (const [trackId, data] of Object.entries(trackScores)) {
+                    if (data.artists && data.score > 10) {
+                        data.artists.forEach(artist => {
+                            if (artist.name) artistScores[artist.name] = (artistScores[artist.name] || 0) + data.score;
+                        });
+                    }
+                }
+                
+                const topArtists = Object.entries(artistScores)
+                    .sort((a, b) => b[1] - a[1])
+                    .slice(0, 5)
+                    .map(([name]) => name);
+
+                let apiUrl = '';
+                if (topArtists.length > 0 && Math.random() < 0.7) {
+                    const randomArtist = topArtists[Math.floor(Math.random() * topArtists.length)];
+                    apiUrl = `https://api.deezer.com/search?q=${encodeURIComponent(randomArtist)}&limit=30`;
+                } else if (vibeGenre) {
+                    const randomOffset = Math.floor(Math.random() * 50);
+                    apiUrl = `https://api.deezer.com/search?q=${encodeURIComponent(vibeGenre)}&limit=30&index=${randomOffset}`;
+                } else {
+                    apiUrl = `https://api.deezer.com/chart/0/tracks?limit=30`;
+                }
+
+                return new Promise((resolve) => {
+                    fetchDeezer(apiUrl, async (data) => {
+                        await processVibeTracks(data.data || [], isAppend);
+                        resolve();
+                    });
+                });
+            } catch (error) {
+                console.error("Ошибка загрузки VIBE треков:", error);
+            }
+        }
+
+        async function processVibeTracks(fetchedTracks, isAppend) {
+            let validTracks = await enrichTracksWithITunesCovers(fetchedTracks);
+
+            const userFavs = favorites.length > 0 ? favorites : listenHistory;
+            let combinedPool = [...validTracks, ...userFavs];
+
+            const uniqueTracks = [];
+            const seenIds = new Set();
+            for (const t of combinedPool) {
+                if (!seenIds.has(t.id)) {
+                    seenIds.add(t.id);
+                    uniqueTracks.push(t);
+                }
+            }
+
+            const scoredTracks = uniqueTracks.map(track => {
+                let vScore = 0;
+                const trackData = trackScores[track.id] || { score: 0, lastPlayed: 0 };
+
+                if (trackData.score <= -20) return { ...track, vScore: -999 };
+                
+                const isFav = favorites.some(f => f.id === track.id);
+                vScore += isFav ? 50 : Math.max(0, trackData.score);
+
+                const isPlayedInThisSession = vibeSessionHistory.has(track.id);
+                
+                if (trackData.lastPlayed || isPlayedInThisSession) {
+                    const hoursSincePlayed = (Date.now() - (trackData.lastPlayed || Date.now())) / 3600000;
+                    
+                    if (isPlayedInThisSession || hoursSincePlayed < 4) {
+                        vScore -= 200;
+                    } else {
+                        vScore += Math.min(hoursSincePlayed, 24);
+                    }
+                } else {
+                    vScore += 30;
+                }
+
+                return { ...track, vScore, source: 'deezer' };
+            });
+
+            let finalPool = scoredTracks
+                .filter(t => t.vScore > 0)
+                .sort((a, b) => (b.vScore || 1) - (a.vScore || 1));
+
+            const topPool = finalPool.slice(0, 15).sort(() => 0.5 - Math.random());
+
+            topPool.forEach(t => vibeSessionHistory.add(t.id));
+
+            if (isAppend) {
+                vibeQueue = [...vibeQueue, ...topPool];
+            } else {
+                vibeQueue = topPool;
+            }
+        }
+
+        const MOODS = [
+            { id: '0', name: 'Все', q: '' }, { id: 'pop', name: 'Поп', q: 'pop' }, { id: 'rap', name: 'Рэп', q: 'rap' }, { id: 'rock', name: 'Рок', q: 'rock' }, { id: 'dance', name: 'Дэнс', q: 'dance' }, { id: 'chill', name: 'Чилл', q: 'chill' }, { id: 'sad', name: 'Грусть', q: 'sad' }, { id: 'workout', name: 'Спорт', q: 'workout' }, { id: 'lofi', name: 'Lo-Fi', q: 'lofi' }, { id: 'metal', name: 'Метал', q: 'metal' }
+        ];
+
+        function initMoods() {
+            document.getElementById('mood-selector').innerHTML = MOODS.map(m => `
+                <button onclick="selectMood('${m.id}', '${m.q}', this)" class="mood-chip px-5 py-2.5 rounded-full glass text-[11px] font-bold ${m.id === '0' ? 'active' : ''} active:scale-95">
+                    ${m.name}
+                </button>`).join('');
+        }
+
+        window.selectMood = (id, query, btn) => {
+            document.querySelectorAll('.mood-chip').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            document.getElementById('trending-list').innerHTML = '<div class="spinner mx-auto self-center"></div>';
+            if (id === '0') { document.getElementById('trends-title').innerText = ""; loadTrending('0'); }
+            else { document.getElementById('trends-title').innerText = ""; loadMoodTracks(query); }
+        };
+
+        function loadTrending(chartId) {
+            fetchDeezer(`https://api.deezer.com/chart/${chartId}/tracks?limit=30`, (data) => {
+                window.trendingTracks = data.data.map(t => ({...t, source: 'deezer'})); 
+                cacheTrends(window.trendingTracks);
+                renderTrending(window.trendingTracks);
+            });
+        }
+
+        function loadMoodTracks(query) {
+             fetchDeezer(`https://api.deezer.com/search?q=${query}&limit=40`, (data) => {
+                window.trendingTracks = data.data.map(t => ({...t, source: 'deezer'})); 
+                cacheTrends(window.trendingTracks);
+                renderTrending(window.trendingTracks);
+            });
+        }
+
+        function renderTrending(tracks) {
+             const currentId = currentQueue[currentIndex]?.id;
+             const currentImg = currentQueue[currentIndex]?.album?.cover_xl || currentQueue[currentIndex]?.album?.cover_medium || (tracks && tracks[0]?.album?.cover_medium) || '';
+             const blobStyle = `background-image: url('${currentImg}'); background-size: cover; background-position: center; filter: blur(50px) brightness(0.5) grayscale(0); transition: background-image 1.2s ease; will-change: background-image; transform: translate3d(0,0,0);`;
+             const vibeHTML = `
+                <div class="trending-item active:scale-95 transition" onclick="playMyVibe()">
+                    <div class="w-full aspect-square rounded-[42px] mb-4 relative overflow-hidden bg-black/50 border border-white/10 group z-0">
+                        <div id="vibe-blob-1" class="absolute inset-[-40%] rounded-full vibe-circle-1 mix-blend-screen opacity-80" style="${blobStyle}"></div>
+                        <div id="vibe-blob-2" class="absolute inset-[-40%] rounded-full vibe-circle-2 mix-blend-screen opacity-60" style="${blobStyle} animation-delay: -3.5s;"></div>
+                        <div class="absolute inset-0 flex flex-col items-center justify-center z-10 backdrop-blur-[4px]">
+                            <div class="p-3 bg-white/10 rounded-full mb-2 backdrop-blur-md border border-white/20"><svg class="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 24 24"><path d="M13 10V3L4 14h7v7l9-11h-7z"/></svg></div>
+                            <h3 class="text-xl font-black italic tracking-tighter text-white leading-none text-center">МОЙ<br>VIBE</h3>
+                        </div>
+                    </div>
+                </div>`;
+            const tracksHTML = tracks.map((t, i) => {
+                const isOffline = offlineTracks.some(off => off.id === t.id);
+                const score = trackScores[t.id]?.score || 0;
+                const scoreIndicator = score > 50 ? '🔥' : score < -20 ? '👎' : '';
+                return `
+                <div class="trending-item active:scale-95 transition ${t.id == currentId ? 'active-track' : ''}" data-id="${t.id}" onclick="playFromList('trending', ${i})">
+                    <img src="${t.album.cover_medium}" loading="lazy" class="w-full aspect-square rounded-[42px] mb-4 shadow-2xl object-cover transition-all bg-zinc-800" onerror="this.src='https://via.placeholder.com/190/ffffff/000000?text=DEVO'">
+                </div>`}).join('');
+            document.getElementById('trending-list').innerHTML = vibeHTML + tracksHTML; updateUI();
+        }
+
+        async function loadRecommendations() {
+            const titleEl = document.getElementById('recommend-list')?.previousElementSibling;
+
+            if (listenHistory && listenHistory.length > 0) {
+                if (titleEl) titleEl.innerText = "ВЫ НЕДАВНО СЛУШАЛИ";
+                
+                window.recommendTracks = listenHistory.slice(0, 20);
+                
+                cacheRecommendations(window.recommendTracks);
+                
+                renderTracks('recommend-list', window.recommendTracks, 'recommend');
+                updateUI();
+                return;
+            }
+
+            if (titleEl) titleEl.innerText = "ПОПУЛЯРНОЕ СЕЙЧАС";
+
+            if (vkToken && isProxyAvailable) {
+                try {
+                    document.getElementById('recommend-list').innerHTML = '<div class="spinner mx-auto my-4"></div>';
+                    const response = await fetch(`${PROXY_SERVER}/vk_search?q=популярные хиты&token=${vkToken}&count=20`);
+                    const vkData = await response.json();
+
+                    if (vkData.tracks && vkData.tracks.length > 0) {
+                        const vkTracks = await enrichTracksWithITunesCovers(vkData.tracks);
+                        window.recommendTracks = vkTracks;
+                        cacheRecommendations(window.recommendTracks);
+                        renderTracks('recommend-list', window.recommendTracks, 'recommend');
+                        updateUI();
+                        return;
+                    }
+                } catch (error) {
+                    console.error("VK fallback failed:", error);
+                }
+            }
+
+            fetchDeezer('https://api.deezer.com/chart/0/tracks?limit=20', async (data) => {
+                document.getElementById('recommend-list').innerHTML = '<div class="spinner mx-auto my-4"></div>';
+                let tracks = data.data || [];
+                const enriched = await enrichTracksWithITunesCovers(tracks);
+                window.recommendTracks = enriched.map(t => ({...t, source: 'deezer'}));
+                cacheRecommendations(window.recommendTracks);
+                renderTracks('recommend-list', window.recommendTracks, 'recommend');
+                updateUI();
+            });
+        }
+
+        function renderTracks(containerId, tracks, type) {
+            const currentId = currentQueue[currentIndex]?.id;
+            document.getElementById(containerId).innerHTML = tracks.map((t, i) => {
+                const isOffline = offlineTracks.some(off => off.id === t.id);
+                const score = trackScores[t.id]?.score || 0;
+                const scoreIndicator = score > 50 ? '🔥' : score < -20 ? '👎' : '';
+                return `
+                <div class="p-4 flex items-center gap-5 track-card active:scale-95 transition ${t.id == currentId ? 'active-track' : ''}" data-id="${t.id}" onclick="playFromList('${type}', ${i})">
+                    <img src="${t.album?.cover_medium || ''}" loading="lazy" class="w-14 h-14 rounded-2xl object-cover bg-zinc-800" onerror="this.src='https://via.placeholder.com/56/ffffff/000000?text=DEVO'">
+                    <div class="flex-1 min-w-0">
+                        <h4 class="text-sm font-bold truncate-custom">${t.title || 'Unknown'} ${isOffline ? '⬇️' : ''} ${scoreIndicator}</h4>
+                        <div class="flex items-center gap-2">
+                            ${t.explicit_lyrics ? '<span class="text-[8px] border border-white/30 px-1 rounded text-white/50 font-bold">E</span>' : ''}
+                            <p class="text-[10px] opacity-30 uppercase font-black truncate-custom">${t.artist?.name || 'Unknown'}</p>
+                        </div>
+                    </div>
+                </div>`}).join('');
+        }
+
+        window.openArtist = (artistId) => {
+            switchScreen('artist');
+            document.getElementById('artist-tracks-list').innerHTML = '<div class="spinner mx-auto"></div>';
+            document.getElementById('artist-albums-list').innerHTML = '';
+            fetchDeezer(`https://api.deezer.com/artist/${artistId}`, (data) => {
+                currentArtist = data; document.getElementById('artist-name-title').innerText = data.name;
+                document.getElementById('artist-cover').src = data.picture_xl || data.picture_big;
+                document.getElementById('artist-fans').innerText = new Intl.NumberFormat('ru-RU').format(data.nb_fan);
+                if(unsubscribeArtistStats) unsubscribeArtistStats();
+                
+                watchSubscribers(artistId.toString());
+                
+                const isSubbed = subscriptions.some(s => s.id === artistId);
+                const btn = document.getElementById('artist-sub-btn');
+                btn.innerText = isSubbed ? 'Вы подписаны' : 'Подписаться';
+                btn.classList.toggle('active', isSubbed);
+            });
+            fetchDeezer(`https://api.deezer.com/artist/${artistId}/top?limit=20`, async (data) => {
+                const enrichedTracks = await enrichTracksWithITunesCovers(data.data);
+                window.artistTracks = enrichedTracks.map(t => ({...t, source: 'deezer'})); 
+                renderTracks('artist-tracks-list', window.artistTracks, 'artist');
+            });
+            fetchDeezer(`https://api.deezer.com/artist/${artistId}/albums?limit=15`, (data) => {
+                document.getElementById('artist-albums-list').innerHTML = data.data.map(a => `
+                    <div class="flex-shrink-0 w-32 active:scale-95 transition" onclick="searchFor('${a.title}')">
+                        <img src="${a.cover_medium}" class="w-32 h-32 rounded-3xl mb-2 object-cover bg-zinc-800" onerror="this.src='https://via.placeholder.com/128/ffffff/000000?text=DEVO'">
+                        <p class="text-[10px] font-bold truncate-custom">${a.title}</p>
+                        <p class="text-[8px] opacity-40 font-black uppercase">${a.release_date ? a.release_date.split('-')[0] : ''}</p>
+                    </div>`).join('');
+            });
+        };
+
+        window.playFromList = async (type, idx) => {
+            let list = [];
+            if (type === 'trending') list = window.trendingTracks;
+            else if (type === 'recommend') list = window.recommendTracks;
+            else if (type === 'search') list = window.searchTracks;
+            else if (type === 'fav') list = favorites;
+            else if (type === 'history') list = listenHistory;
+            else if (type === 'artist') list = window.artistTracks;
+            else if (type === 'vibe') list = vibeQueue;
+            else if (type === 'offline') list = offlineTracks;
+            
+            isVibeMode = (type === 'vibe');
+            currentIndex = idx; 
+            currentQueue = list;
+            await loadTrackHybrid(list[idx]);
+        };
+
+        async function loadTrackHybrid(track) {
+            setLoading(true); 
+            document.getElementById('mini-player').classList.remove('hidden', 'opacity-0'); 
+            
+            if (track.artist) {
+                addArtistToScore(track.id, track.artist.id, track.artist.name);
+            }
+            
+            updateTrackScore(track.id, 'play_start');
+            
+            const enrichedTrack = await enrichTrackWithITunesCover(track);
+            Object.assign(track, enrichedTrack);
+            
+            updateMediaMetadata(track);
+            
+            showMusicNotification(track, !audio.paused);
+            
+            updateUI();
+            
+            const bgUrl = track.album?.cover_xl || track.album?.cover_medium || '';
+            
+            setBackgroundFromCover(bgUrl);
+            
+            const v1 = document.getElementById('vibe-blob-1'), v2 = document.getElementById('vibe-blob-2');
+            if(v1 && v2 && bgUrl) { 
+                v1.style.backgroundImage = `url('${bgUrl}')`;
+                v2.style.backgroundImage = `url('${bgUrl}')`;
+            }
+
+            try {
+                const cache = await caches.open('devo-audio-cache');
+                const cachedResponse = await cache.match(`/offline-audio/${track.id}`);
+
+                if (cachedResponse) {
+                    const blob = await cachedResponse.blob();
+                    if (audio.src) URL.revokeObjectURL(audio.src);
+                    audio.src = URL.createObjectURL(blob);
+                    
+                    // Инициализируем аудио контекст для обработки
+                    if (!audioContext) {
+                        connectAudioProcessing();
+                    }
+                    
+                    await audio.play(); 
+                    addToHistory(track);
+                    
+                    setTimeout(() => updateMediaPositionState(), 100);
+                    setLoading(false);
+                    
+                    let lastTime = 0;
+                    const checkProgress = () => {
+                        if (audio.currentTime > 40 && lastTime < 40) {
+                            updateTrackScore(track.id, 'play_40s', audio.currentTime, audio.duration);
+                        }
+                        lastTime = audio.currentTime;
+                        
+                        if (audio.ended) {
+                            updateTrackScore(track.id, 'play_complete');
+                            audio.removeEventListener('timeupdate', checkProgress);
+                        }
+                    };
+                    audio.addEventListener('timeupdate', checkProgress);
+                    
+                    return;
+                }
+
+                if (!vkToken) {
+                    showToast("Требуется VK токен");
+                    setLoading(false);
+                    return;
+                }
+                
+                if (!isProxyAvailable) {
+                    showToast("Прокси-сервер не настроен");
+                    setLoading(false);
+                    return;
+                }
+                
+                const searchQ = `${track.artist?.name || ''} ${track.title || ''}`.trim();
+                if (!searchQ) {
+                    setLoading(false);
+                    return;
+                }
+                
+                const response = await fetch(`${PROXY_SERVER}/vk_search?q=${encodeURIComponent(searchQ)}&token=${vkToken}`);
+                const vkData = await response.json();
+                
+                if (vkData.tracks && vkData.tracks.length > 0 && vkData.tracks[0].preview) {
+                    audio.src = vkData.tracks[0].preview; 
+                    
+                    // Инициализируем аудио контекст для обработки
+                    if (!audioContext) {
+                        connectAudioProcessing();
+                    }
+                    
+                    await audio.play(); 
+                    addToHistory(track);
+                    
+                    let lastTime = 0;
+                    const checkProgress = () => {
+                        if (audio.currentTime > 40 && lastTime < 40) {
+                            updateTrackScore(track.id, 'play_40s', audio.currentTime, audio.duration);
+                        }
+                        lastTime = audio.currentTime;
+                        
+                        if (audio.ended) {
+                            updateTrackScore(track.id, 'play_complete');
+                            audio.removeEventListener('timeupdate', checkProgress);
+                        }
+                    };
+                    audio.addEventListener('timeupdate', checkProgress);
+                    
+                    setTimeout(() => {
+                        updateMediaPositionState();
+                    }, 100);
+                } else {
+                    showToast("Трек не найден в VK");
+                }
+            } catch (e) {
+                console.error("Playback error:", e);
+                if (!navigator.onLine) {
+                    showToast("Нет интернета. Трек не скачан.");
+                } else {
+                    showToast("Ошибка воспроизведения");
+                }
+            }
+            setLoading(false);
+        }
+
+        async function addToHistory(track) {
+            if (!currentUserId) return;
+            const updated = [track, ...listenHistory.filter(t => t.id !== track.id)].slice(0, 30);
+            await setDoc(doc(db, 'users', currentUserId), { history: updated }, { merge: true });
+            
+            if (isVibeMode) {
+                analyzeUserPreferences();
+            }
+        }
+
+        function setLoading(loading) {
+            isLoading = loading;
+            const mS = document.getElementById('m-spinner'), fS = document.getElementById('f-spinner'), mI = document.getElementById('m-icon'), fI = document.getElementById('f-icon');
+            if (loading) {
+                if (mS) mS.classList.remove('hidden'); if (fS) fS.classList.remove('hidden');
+                if (mI) mI.style.opacity = '0'; if (fI) fI.style.opacity = '0';
+            } else {
+                if (mS) mS.classList.add('hidden'); if (fS) fS.classList.add('hidden');
+                if (mI) mI.style.opacity = '1'; if (fI) fI.style.opacity = '1';
+            }
+        }
+
+        window.togglePlay = (e) => { 
+            e?.stopPropagation(); 
+            if (!isLoading) {
+                if (audio.paused) {
+                    audio.play();
+                    if (mediaSession) mediaSession.playbackState = 'playing';
+                    
+                    if (currentIndex !== -1) {
+                        showMusicNotification(currentQueue[currentIndex], true);
+                    }
+                } else {
+                    audio.pause();
+                    if (mediaSession) mediaSession.playbackState = 'paused';
+                    
+                    if (currentIndex !== -1 && audio.currentTime < 40) {
+                        updateTrackScore(currentQueue[currentIndex].id, 'skip', audio.currentTime);
+                    }
+                    
+                    if (currentIndex !== -1) {
+                        showMusicNotification(currentQueue[currentIndex], false);
+                    }
+                }
+            }
+        };
+        
+        audio.onplay = () => { 
+            updatePlayIcons(false); 
+            if (mediaSession) mediaSession.playbackState = 'playing';
+            
+            if (currentIndex !== -1) {
+                showMusicNotification(currentQueue[currentIndex], true);
+            }
+            
+            // Запускаем пульсацию обложки
+            startAlbumPulse();
+            
+            updateMediaPositionState();
+        };
+        
+        audio.onpause = () => { 
+            updatePlayIcons(true); 
+            if (mediaSession) mediaSession.playbackState = 'paused';
+            
+            if (currentIndex !== -1 && audio.currentTime < 40 && audio.currentTime > 0) {
+                updateTrackScore(currentQueue[currentIndex].id, 'skip', audio.currentTime);
+            }
+            
+            if (currentIndex !== -1) {
+                showMusicNotification(currentQueue[currentIndex], false);
+            }
+            
+            // Останавливаем пульсацию
+            stopAlbumPulse();
+        };
+        
+        audio.onended = () => { 
+            if (currentIndex !== -1) {
+                updateTrackScore(currentQueue[currentIndex].id, 'play_complete');
+            }
+            
+            if (isVibeMode && vibeQueue.length > 0) {
+                loadSimilarTrack();
+            } else {
+                nextTrack();
+            }
+        };
+
+        audio.ontimeupdate = () => {
+            if (Math.floor(audio.currentTime) % 1 === 0) {
+                updateMediaPositionState();
+            }
+        };
+
+        audio.onloadedmetadata = () => {
+            updateMediaPositionState();
+        };
+
+        async function loadSimilarTrack() {
+            if (vibeQueue.length === 0) return;
+            
+            vibeIndex++;
+            currentIndex = vibeIndex;
+            
+            if (vibeIndex >= vibeQueue.length - 3) {
+                loadVibeTracks(true);
+            }
+            
+            if (vibeQueue[vibeIndex]) {
+                await loadTrackHybrid(vibeQueue[vibeIndex]);
+            } else {
+                vibeIndex = 0;
+                currentIndex = 0;
+                await loadTrackHybrid(vibeQueue[0]);
+            }
+        }
+
+        function updatePlayIcons(paused) {
+            const path = paused ? '<path d="M8 5v14l11-7z"/>' : '<path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>';
+            document.getElementById('m-icon').innerHTML = document.getElementById('f-icon').innerHTML = path;
+        }
+
+        window.nextTrack = () => {
+            if (currentIndex !== -1 && audio.currentTime < 40 && audio.currentTime > 0) {
+                updateTrackScore(currentQueue[currentIndex].id, 'skip', audio.currentTime);
+            }
+            
+            if (isVibeMode && vibeQueue.length > 0) {
+                loadSimilarTrack();
+            } else if (currentIndex < currentQueue.length - 1) {
+                currentIndex++;
+                loadTrackHybrid(currentQueue[currentIndex]);
+            }
+        };
+        
+        window.prevTrack = () => {
+            if (isVibeMode && vibeQueue.length > 0) {
+                vibeIndex = vibeIndex > 0 ? vibeIndex - 1 : vibeQueue.length - 1;
+                currentIndex = vibeIndex;
+                loadTrackHybrid(vibeQueue[vibeIndex]);
+            } else if (currentIndex > 0) {
+                currentIndex--;
+                loadTrackHybrid(currentQueue[currentIndex]);
+            }
+        };
+
+        function updateUI() {
+            if (currentIndex === -1 || !currentQueue[currentIndex]) return;
+            const t = currentQueue[currentIndex];
+            const isFav = favorites.some(f => f.id === t.id);
+            const isSubbed = subscriptions.some(s => s.id === (t.artist?.id || 0));
+            document.getElementById('m-title').innerText = document.getElementById('f-title').innerText = t.title || 'Unknown';
+            document.getElementById('m-artist').innerText = document.getElementById('f-artist').innerText = t.artist?.name || 'Unknown';
+            document.getElementById('m-img').src = t.album?.cover_medium || ''; 
+            document.getElementById('f-img').src = t.album?.cover_xl || t.album?.cover_medium || '';
+            const subBtn = document.getElementById('f-sub');
+            if (subBtn) { subBtn.innerText = isSubbed ? 'Вы подписаны' : 'Подписаться'; subBtn.classList.toggle('active', isSubbed); }
+            [document.getElementById('f-fav'), document.getElementById('m-fav')].forEach(btn => {
+                if (!btn) return; const svg = btn.querySelector('svg');
+                svg.style.fill = isFav ? '#ffffff' : 'none'; svg.style.stroke = isFav ? '#ffffff' : 'currentColor';
+            });
+            
+            const downloadBtn = document.getElementById('f-download');
+            if (downloadBtn) {
+                const isDownloaded = offlineTracks.some(off => off.id === t.id);
+                const svgDown = downloadBtn.querySelector('svg');
+                svgDown.style.stroke = isDownloaded ? '#ffffff' : 'currentColor';
+            }
+            
+            document.querySelectorAll('.track-card, .trending-item').forEach(c => c.classList.toggle('active-track', c.dataset.id == t.id));
+        }
+
+        window.seek = (e) => {
+            if (!audio.duration) return; const rect = e.currentTarget.getBoundingClientRect();
+            audio.currentTime = ((e.clientX - rect.left) / rect.width) * audio.duration;
+            
+            updateMediaPositionState();
+        };
+
+        function updateProgress() {
+            if (audio.duration) {
+                const pct = (audio.currentTime / audio.duration) * 100;
+                document.getElementById('m-progress-bar').style.width = document.getElementById('f-progress').style.width = pct + '%';
+                document.getElementById('f-current').innerText = formatTime(audio.currentTime); document.getElementById('f-duration').innerText = formatTime(audio.duration);
+            }
+            requestAnimationFrame(updateProgress);
+        }
+        requestAnimationFrame(updateProgress);
+
+        function formatTime(s) { const m = Math.floor(s/60), sc = Math.floor(s%60); return `${m}:${sc < 10 ? '0' : ''}${sc}`; }
+
+        function renderHistory() {
+            const box = document.getElementById('search-history-box');
+            if (history.length === 0) { box.classList.add('hidden'); return; }
+            box.classList.remove('hidden');
+            document.getElementById('search-history').innerHTML = history.slice(0, 5).map(h => `<div class="glass px-4 py-2 rounded-full text-[10px] font-bold uppercase cursor-pointer" onclick="searchFor('${h}')">${h}</div>`).join('');
+        }
+
+        window.searchFor = (query) => { 
+            switchScreen('search'); 
+            document.getElementById('search-input').value = query; 
+            searchQuery = query;
+            searchPage = 0;
+            triggerSearch(query); 
+        };
+        
+        document.getElementById('search-input').addEventListener('input', (e) => {
+            const q = e.target.value.trim(); 
+            clearTimeout(searchTimeout);
+            if (q.length >= 2) {
+                searchTimeout = setTimeout(() => {
+                    searchQuery = q;
+                    searchPage = 0;
+                    triggerSearch(q);
+                }, 500);
+            }
+        });
+
+        async function triggerSearch(q) {
+            if (q.length < 2) return;
+            if (!history.includes(q)) { 
+                history.unshift(q); 
+                history = history.slice(0, 10); 
+                localStorage.setItem('devo_search_history', JSON.stringify(history)); 
+                renderHistory(); 
+            }
+            
+            document.getElementById('search-results').innerHTML = ''; 
+            document.getElementById('search-loader').classList.remove('hidden');
+            document.getElementById('search-pagination-container').classList.remove('visible');
+            document.getElementById('search-stats').classList.add('hidden');
+            
+            const vkResults = await searchVK(q, searchPage);
+            
+            window.searchTracks = vkResults;
+            document.getElementById('search-loader').classList.add('hidden');
+            
+            if (vkResults.length === 0) {
+                document.getElementById('search-results').innerHTML = '<div class="text-center py-10 opacity-30 text-xs font-black uppercase">Ничего не найдено</div>';
+            } else {
+                renderTracks('search-results', vkResults, 'search');
+                renderSearchPagination();
+            }
+        }
+
+        window.openFullPlayer = () => {
+            document.body.classList.add('player-open'); 
+            document.getElementById('full-player').classList.add('open');
+            document.getElementById('mini-player').classList.add('opacity-0'); 
+            setTimeout(() => document.getElementById('mini-player').classList.add('hidden'), 300);
+            
+            // Запускаем пульсацию если музыка играет
+            if (!audio.paused) {
+                startAlbumPulse();
+            }
+        };
+        
+        window.closeFullPlayer = () => {
+            document.body.classList.remove('player-open'); 
+            document.getElementById('full-player').classList.remove('open');
+            document.getElementById('mini-player').classList.remove('hidden'); 
+            setTimeout(() => document.getElementById('mini-player').classList.remove('opacity-0'), 10);
+            
+            // Останавливаем пульсацию
+            stopAlbumPulse();
+        };
+
+        miniPlayer.addEventListener('touchstart', (e) => { touchStart.x = e.touches[0].clientX; }, { passive: true });
+        miniPlayer.addEventListener('touchend', (e) => {
+            const diffX = touchStart.x - e.changedTouches[0].clientX;
+            if (Math.abs(diffX) > 50) diffX > 0 ? nextTrack() : prevTrack();
+        }, { passive: true });
+
+        fullPlayer.addEventListener('touchstart', (e) => {
+            if (e.target.closest('button') || e.target.id === 'progress-container') return;
+            touchStart.y = e.touches[0].clientY; isSwipingFullPlayer = true;
+            fullPlayer.style.transition = 'none';
+        }, { passive: true });
+
+        fullPlayer.addEventListener('touchmove', (e) => {
+            if (!isSwipingFullPlayer) return;
+            const diffY = e.touches[0].clientY - touchStart.y;
+            if (diffY > 0) fullPlayer.style.transform = `translate3d(0, ${diffY}px, 0)`;
+        }, { passive: false });
+
+        fullPlayer.addEventListener('touchend', (e) => {
+            if (!isSwipingFullPlayer) return; isSwipingFullPlayer = false;
+            const diffY = e.changedTouches[0].clientY - touchStart.y;
+            fullPlayer.style.transition = 'top 0.5s cubic-bezier(0.19, 1, 0.22, 1), transform 0.3s ease-out';
+            if (diffY > 120) { closeFullPlayer(); setTimeout(() => { fullPlayer.style.transform = 'translate3d(0,0,0)'; }, 450); }
+            else { fullPlayer.style.transform = 'translate3d(0,0,0)'; }
+        }, { passive: true });
+
+        window.copyID = (id) => copyToClipboard(document.getElementById(id).innerText);
+        window.copyMyID = () => currentUserId && copyToClipboard(currentUserId);
+        function copyToClipboard(text) {
+            const el = document.createElement('textarea'); el.value = text; document.body.appendChild(el); el.select(); document.execCommand('copy'); document.body.removeChild(el); showToast("Скопировано");
+        }
+
+        function showToast(msg) {
+            const t = document.getElementById('toast'); t.innerText = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 2000);
+        }
+
+        window.switchScreen = (id) => {
+            // Скрываем пагинацию при смене экрана
+            document.getElementById('search-pagination-container').classList.remove('visible');
+            
+            document.querySelectorAll('.screen, .nav-btn').forEach(x => x.classList.remove('active'));
+            const s = document.getElementById(`screen-${id}`); if(s) s.classList.add('active');
+            const n = document.getElementById(`nav-${id}`); if(n) n.classList.add('active');
+        };
+
+        window.toggleFavorite = async (e) => {
+            e.stopPropagation(); if (!currentUserId || currentIndex === -1) return;
+            const t = currentQueue[currentIndex], exists = favorites.find(f => f.id === t.id);
+            const updated = exists ? favorites.filter(f => f.id !== t.id) : [...favorites, t];
+            await setDoc(doc(db, 'users', currentUserId), { favorites: updated }, { merge: true });
+            
+            if (exists) {
+                updateTrackScore(t.id, 'unlike');
+            } else {
+                updateTrackScore(t.id, 'like');
+            }
+            
+            showToast(exists ? "Убрано из избранного" : "Добавлено в избранное");
+        };
+
+        window.toggleSubscribe = async (e) => {
+            e.stopPropagation(); 
+            if (!currentUserId || currentIndex === -1) return;
+            
+            const artist = currentQueue[currentIndex].artist;
+            if (!artist || !artist.id) return;
+            
+            const artistId = artist.id.toString();
+            const isSubscribed = subscriptions.some(s => s.id == artistId);
+
+            try {
+                const counterRef = ref(rtdb, `artists/${artistId}/subscribersCount`);
+                
+                await runTransaction(counterRef, (currentCount) => {
+                    return (currentCount || 0) + (isSubscribed ? -1 : 1);
+                });
+
+                if (isSubscribed) {
+                    subscriptions = subscriptions.filter(s => s.id != artistId);
+                } else {
+                    subscriptions.push({
+                        id: artistId,
+                        name: artist.name,
+                        picture_medium: artist.picture_medium || ''
+                    });
+                }
+
+                localStorage.setItem('devo_subscriptions', JSON.stringify(subscriptions));
+                
+                await setDoc(doc(db, 'users', currentUserId), { subscriptions: subscriptions }, { merge: true });
+                
+                renderSubscriptions();
+                updateUI();
+                
+                showToast(isSubscribed ? "Отписались" : "Подписались");
+            } catch (error) {
+                console.error("Ошибка при изменении подписки:", error);
+                showToast("Ошибка, попробуйте позже");
+            }
+        };
+
+        window.renderFavorites = () => renderTracks('favorites-list', favorites, 'fav');
+        
+        window.renderSubscriptions = () => {
+            const container = document.getElementById('subscriptions-list');
+            if (subscriptions.length === 0) { container.innerHTML = '<div class="opacity-10 py-4 text-[9px] font-black uppercase">Нет подписок</div>'; return; }
+            container.innerHTML = subscriptions.map(s => `
+                <div class="flex flex-col items-center gap-2 flex-shrink-0 w-20 active:scale-95 transition" onclick="openArtist(${s.id})">
+                    <div class="w-16 h-16 rounded-full bg-zinc-800 overflow-hidden border border-white/10"><img src="${s.picture_medium || 'https://api.deezer.com/artist/'+s.id+'/image'}" class="w-full h-full object-cover" onerror="this.src='https://via.placeholder.com/64/ffffff/000000?text=DEVO'"></div>
+                    <span class="text-[9px] font-black uppercase tracking-tighter truncate w-full text-center opacity-60">${s.name}</span>
+                </div>`).join('');
+        };
+                
+        // Экспортируем функции
+        window.watchSubscribers = watchSubscribers;
+    </script>
+</body>
+</html>

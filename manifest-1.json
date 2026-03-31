@@ -1,0 +1,52 @@
+{
+  "name": "DEVO Music Pro",
+  "short_name": "DEVO",
+  "description": "Музыкальный плеер с офлайн режимом и персональными рекомендациями",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "https://via.placeholder.com/72/000000/ffffff?text=D",
+      "sizes": "72x72",
+      "type": "image/png"
+    },
+    {
+      "src": "https://via.placeholder.com/96/000000/ffffff?text=D",
+      "sizes": "96x96",
+      "type": "image/png"
+    },
+    {
+      "src": "https://via.placeholder.com/128/000000/ffffff?text=D",
+      "sizes": "128x128",
+      "type": "image/png"
+    },
+    {
+      "src": "https://via.placeholder.com/144/000000/ffffff?text=D",
+      "sizes": "144x144",
+      "type": "image/png"
+    },
+    {
+      "src": "https://via.placeholder.com/152/000000/ffffff?text=D",
+      "sizes": "152x152",
+      "type": "image/png"
+    },
+    {
+      "src": "https://via.placeholder.com/192/000000/ffffff?text=D",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "https://via.placeholder.com/384/000000/ffffff?text=D",
+      "sizes": "384x384",
+      "type": "image/png"
+    },
+    {
+      "src": "https://via.placeholder.com/512/000000/ffffff?text=D",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
